@@ -8,14 +8,29 @@ import paho.mqtt.client as mqttSub
 import paho.mqtt.publish as mqttPub
 import xml.etree.ElementTree as ET
 import requests
+from xml.dom import minidom
 
+
+# Global vars
 mqttServer = '<name_or_ip>'
 mqttTopic = '/hifi/'
 hifiIp = '<name_or_ip>'
 logFile = '/var/log/mqtt_hifi'
 refreshPeriod = 10
-httpTimeout = (2, 4)    # Connect, Read    
+refreshCount = 0
+httpTimeout = (2, 6)    # Connect, Read    
 debug = False
+currentStatus = {
+    'power': '',
+    'source': '',
+    'mute': '',
+    'volume': 0,
+    'band': '',
+    'playing': '',
+    'favorite': '',
+}
+cmd_queue = []
+
 
 # Hifi vars
 maxVol = 60
@@ -33,16 +48,6 @@ powerMap = {
 muteMap = {
     'ON': 'MuteOn',
     'OFF': 'MuteOff',
-}
-
-currentStatus = {
-    'power': '',
-    'source': '',
-    'mute': '',
-    'volume': 0,
-    'band': '',
-    'playing': '',
-    'favorite': '',
 }
 
 ##      Logging
@@ -99,12 +104,34 @@ def hifiStatus():
             if currentStatus[i] != hs[i]:
                 currentStatus[i] = hs[i]
                 log('Status of ' + i + ' changed to ' + hs[i])
-                mqttPub.single(mqttTopic + i, hs[i], hostname=mqttServer) 
+                mqttPub.single(mqttTopic + i, hs[i], hostname=mqttServer)
     if (debug):
         log('Refreshed status from ' + hifiIp)
-    threading.Timer(refreshPeriod, hifiStatus).start()
 
-##      Send a command to the Hifi
+def hifiSync():
+    global refreshCount
+    refreshCount += 1
+    if len(cmd_queue) > 0:
+        # Send a queued command
+        url = cmd_queue.pop(0)
+        if (debug):
+            log('Sending ' + url)
+        try:
+            r = requests.get(url, timeout=httpTimeout)
+            if (r.status_code != requests.codes.ok):
+                log(url + ' returned ' + r.status_code)
+        except requests.exceptions.RequestException as e:
+            log(url + ' failed: ' + e)
+        if powerMap['ON'] in url:
+            log('sleeping')
+            sleep(4)    # Let it 'warm up' before sending anything else
+    else:
+        if refreshCount >= refreshPeriod:
+            hifiStatus()
+            refreshCount = 0
+    threading.Timer(1, hifiSync).start()
+
+##      Queue a command to the Hifi
 
 def hifiSend(func, command):
     baseUrl = 'http://' + hifiIp + '/goform/'
@@ -142,10 +169,8 @@ def hifiSend(func, command):
         url = baseUrl + 'formiPhoneAppFavorite_Call.xml?' + command
     if url is not None:
         if (debug):
-            log(url)
-        r = requests.get(url, timeout=httpTimeout)
-        if (r.status_code != requests.codes.ok):
-            log(url + ' returned ' + r.status_code)
+            log('Queuing ' + url)
+        cmd_queue.append(url)
 
 ##
 ##      MQTT Callbacks
@@ -183,6 +208,6 @@ if __name__ == "__main__":
         log('Couldnt connect to MQTT server ' + mqttServer)
         sys.exit(1)
 
-    hifiStatus()
+    hifiSync()
     mClient.loop_forever()
 
